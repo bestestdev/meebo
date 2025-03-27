@@ -25,6 +25,7 @@ This project implements an AI-driven robot using a local LLM (Qwen2.5:7b) as its
 - Streaming capabilities for real-time LLM interaction
 - Computer vision processing for camera input
 - Speech recognition and audio processing
+- Tool-based action system for robot control
 
 ## Architecture
 
@@ -32,6 +33,212 @@ The system uses a client-server architecture:
 - **Server**: A dedicated, more powerful machine running Ollama and the Qwen2.5:7b model
 - **Client**: Raspberry Pi CM5 that handles all sensor input, audio I/O, and motor control
 - Communication happens over a private network connection
+
+## Development Setup
+
+### Setting Up the Development Environment
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/yourusername/meebo.git
+   cd meebo
+   ```
+
+2. **Create and activate a virtual environment**:
+   ```bash
+   python3 -m venv venv
+   
+   # On Windows
+   venv\Scripts\activate
+   
+   # On macOS/Linux
+   source venv/bin/activate
+   ```
+
+3. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Configure Ollama server**:
+   - Install Ollama from [https://ollama.ai/](https://ollama.ai/)
+   - Pull the Qwen2.5:7b model:
+     ```bash
+     ollama pull qwen2:7b
+     ```
+   - Start the Ollama server:
+     ```bash
+     ollama serve
+     ```
+
+5. **Configure environment variables**:
+   Create a `.env` file in the root directory with the following variables:
+   ```
+   LLM_HOST=localhost
+   LLM_PORT=11434
+   LLM_MODEL=qwen2.5:7b
+   MEEBO_DEV_MODE=true
+   ```
+
+### Running in Development Mode
+
+The project can run in development mode on a non-Raspberry Pi system, using simulated hardware:
+
+```bash
+# Run with default settings (will auto-detect dev mode on non-Pi systems)
+python3 src/main.py
+
+# Explicitly run in development mode
+python3 src/main.py --dev
+
+# Set logging level
+python3 src/main.py --dev --log-level=DEBUG
+
+# Run in interactive mode (enables voice command detection)
+python3 src/main.py --dev --interactive
+```
+
+#### Command Line Options
+
+- `--dev`: Enable development mode (simulated hardware)
+- `--log-level=LEVEL`: Set logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- `--interactive`: Enable interactive mode with voice command recognition
+
+#### Operation Modes
+
+- **Standard Mode**: The robot autonomously processes sensor data and makes decisions
+- **Interactive Mode**: Additionally listens for voice commands every few seconds
+
+In development mode:
+- All hardware components are simulated
+- The LLM client connects to the configured Ollama server
+- Sensors return simulated readings
+- Motors log movement commands instead of controlling hardware
+- Camera provides simulated frames with randomized "objects"
+- Audio input/output is simulated
+
+### Testing the Tool-Based System
+
+Try out the examples to see how the different features work:
+
+```bash
+# Run the streaming and tool use example
+python3 examples/streaming_tool_example.py
+
+# Run the action tools example (showing how all robot actions use tool calls)
+python3 examples/action_tools_example.py
+```
+
+These examples demonstrate:
+1. Non-streaming responses with tools
+2. Streaming responses with tools (real-time output)
+3. Using tool calls for all robot actions (movement, speech, etc.)
+4. Handling tool call results
+
+### Project Structure
+
+```
+meebo/
+├── docs/                # Documentation
+├── logs/                # Log files (generated at runtime)
+├── examples/            # Example scripts for specific features
+├── src/                 # Source code
+│   ├── brain/           # LLM integration and decision making
+│   ├── sensors/         # Sensor input processing
+│   ├── actuators/       # Motor and movement control
+│   ├── audio/           # Audio input/output
+│   ├── vision/          # Camera and visual processing
+│   ├── utils/           # Utility functions
+│   ├── config/          # Configuration files
+│   └── main.py          # Main entry point
+├── tests/               # Unit tests
+├── requirements.txt     # Python dependencies
+├── setup.py             # Package setup
+└── README.md            # This file
+```
+
+## Action System
+
+Meebo uses a pure tool-based action system that allows the LLM to call functions that execute actions on the robot. All robot capabilities are exposed as tools, providing a consistent interface for the LLM to interact with the robot's hardware.
+
+### Pure Tool-Based Architecture
+
+The system exclusively uses LLM tool calls (function calling) for all robot actions, with these key benefits:
+- **Consistency**: All operations use the same tool-calling pattern
+- **Type Safety**: Tool parameters include type definitions and validation
+- **Streaming Compatibility**: Tool calls can be extracted from streaming responses
+- **Better Prompting**: The LLM is instructed to use tools directly rather than outputting JSON
+
+To see this in action, try the example:
+```bash
+python3 examples/action_tools_example.py
+```
+
+### Core Action Tools
+
+The following tools control the robot's movement and interactions:
+
+- **move_forward**: Move the robot forward
+  ```json
+  {
+    "type": "function",
+    "function": {
+      "name": "move_forward",
+      "description": "Move the robot forward at the specified speed",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "speed": {
+            "type": "integer",
+            "description": "Speed from 0-100 with 100 being the fastest",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": ["speed"]
+      }
+    }
+  }
+  ```
+
+- **move_backward**: Move the robot backward
+- **turn_left**: Turn the robot left
+- **turn_right**: Turn the robot right
+- **stop**: Stop all movement
+- **speak**: Convert text to speech
+- **listen**: Listen for voice commands
+- **capture_image**: Take a picture with the camera
+
+### Information Tools
+
+These tools retrieve information about the robot's state:
+
+- **get_motor_status**: Get the current motor speeds and directions
+  ```json
+  {
+    "type": "function",
+    "function": {
+      "name": "get_motor_status",
+      "description": "Get the current status of robot's motors",
+      "parameters": {}
+    }
+  }
+  ```
+
+- **check_battery**: Check the robot's battery level
+
+## Streaming Responses
+
+The LLM client supports streaming responses, allowing for real-time feedback and improved responsiveness:
+
+- Real-time token generation from the LLM
+- Immediate tool calls appear in the stream as soon as the LLM decides to use them
+- Tool calls can be executed immediately, even before the complete response is finished
+- Better user experience with continuous feedback
+
+## Production Deployment
+
+Instructions for deploying on the Raspberry Pi hardware will be provided once the development phase is complete.
 
 ## Project Goal
 
@@ -41,6 +248,7 @@ The goal is to create a robot that can:
 3. Provide audio feedback through the speaker
 4. Make autonomous decisions using the LLM running on the server
 5. Process visual data from the wide-angle camera for enhanced environmental awareness
+6. Act in real-time with streaming LLM responses and tool usage
 
 ## Implementation Plan
 
