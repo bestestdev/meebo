@@ -9,6 +9,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, List
 import json
+import os
+from dotenv import load_dotenv
 
 # Add the src directory to the path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -20,177 +22,13 @@ from src.sensors.sensor_manager import SensorManager
 from src.actuators.motor_controller import MotorController
 from src.audio.audio_manager import AudioManager
 from src.vision.camera_manager import CameraManager
+from src.tools.robot_tools import ROBOT_TOOLS
+
+# Load environment variables
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(env_path)
 
 logger = logging.getLogger(__name__)
-
-# Define robot tools
-ROBOT_TOOLS = [
-    # Information retrieval tools
-    {
-        "type": "function",
-        "function": {
-            "name": "get_motor_status",
-            "description": "Get the current status of the robot's motors",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_battery",
-            "description": "Check the robot's battery level",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    
-    # Movement action tools
-    {
-        "type": "function",
-        "function": {
-            "name": "move_forward",
-            "description": "Move the robot forward at the specified speed",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "speed": {
-                        "type": "integer",
-                        "description": "Speed from 0-100 with 100 being the fastest",
-                        "minimum": 0,
-                        "maximum": 100
-                    }
-                },
-                "required": ["speed"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "move_backward",
-            "description": "Move the robot backward at the specified speed",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "speed": {
-                        "type": "integer",
-                        "description": "Speed from 0-100 with 100 being the fastest",
-                        "minimum": 0,
-                        "maximum": 100
-                    }
-                },
-                "required": ["speed"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "turn_left",
-            "description": "Turn the robot left at the specified speed",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "speed": {
-                        "type": "integer",
-                        "description": "Speed from 0-100 with 100 being the fastest",
-                        "minimum": 0,
-                        "maximum": 100
-                    }
-                },
-                "required": ["speed"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "turn_right",
-            "description": "Turn the robot right at the specified speed",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "speed": {
-                        "type": "integer",
-                        "description": "Speed from 0-100 with 100 being the fastest",
-                        "minimum": 0,
-                        "maximum": 100
-                    }
-                },
-                "required": ["speed"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "stop",
-            "description": "Stop all robot movement",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    
-    # Audio and sensor tools
-    {
-        "type": "function",
-        "function": {
-            "name": "speak",
-            "description": "Have the robot speak the provided text",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "The text for the robot to say"
-                    },
-                    "wait": {
-                        "type": "boolean",
-                        "description": "Whether to wait for speech to complete before continuing (default: false)"
-                    }
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "listen",
-            "description": "Listen for a voice command with a timeout",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "timeout": {
-                        "type": "number",
-                        "description": "Number of seconds to listen before timing out",
-                        "minimum": 1,
-                        "maximum": 10
-                    }
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "capture_image",
-            "description": "Capture an image from the robot's camera",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    }
-]
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -577,22 +415,84 @@ class MeeboRobot:
         # Goodbye message
         logger.info("Meebo Robot stopped successfully")
 
+def setup_logging(level=logging.INFO):
+    """Set up logging configuration."""
+    log_dir = Path(__file__).parent.parent / 'logs'
+    log_dir.mkdir(exist_ok=True)
+    
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"meebo_{timestamp}.log"
+    
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+    
+    logging.info(f"Logging initialized at level {level}")
+    logging.info(f"Log file: {log_file}")
+
 def main():
-    """Main entry point for the application."""
-    args = parse_arguments()
+    """Main entry point for the Meebo robot."""
+    parser = argparse.ArgumentParser(description='Run the Meebo robot')
+    parser.add_argument('--dev', action='store_true', help='Run in development mode')
+    parser.add_argument('--interactive', action='store_true', help='Run in interactive mode')
+    parser.add_argument('--log-level', default='INFO', help='Set logging level')
+    args = parser.parse_args()
     
-    # Setup logging
-    setup_logger(level=args.log_level)
+    # Set up logging
+    log_level = getattr(logging, args.log_level.upper())
+    setup_logging(log_level)
     
-    # Print system information
-    if IS_RASPBERRY_PI:
-        logger.info("Running on Raspberry Pi hardware")
-    else:
-        logger.info("Running on non-Raspberry Pi system")
+    # Check if running on Raspberry Pi
+    is_pi = os.uname().machine.startswith('arm')
+    if not is_pi:
+        logging.info("Running on non-Raspberry Pi system")
+    
+    # Initialize robot
+    logging.info(f"Initializing Meebo Robot (Dev Mode: {args.dev}, Interactive: {args.interactive})")
+    
+    try:
+        # Initialize components
+        llm_client = LLMClient()
+        sensors = SensorManager(simulation_mode=args.dev)
+        camera = CameraManager(simulation_mode=args.dev)
         
-    # Initialize and start the robot
-    robot = MeeboRobot(dev_mode=args.dev, interactive=args.interactive)
-    robot.start()
+        logging.info("Meebo Robot initialized successfully")
+        logging.info("Starting Meebo Robot control loop")
+        
+        # Main control loop
+        while True:
+            # Get real sensor data
+            sensor_data = sensors.get_all_readings()
+            camera_data = camera.get_frame()
+            
+            # Process through LLM
+            response = llm_client.process(
+                sensor_data=sensor_data,
+                camera_data=camera_data,
+                tools=ROBOT_TOOLS
+            )
+            
+            # Execute actions
+            for action in response["actions"]:
+                result = llm_client.execute_tool(action["tool"], action["params"])
+                logging.info(f"Action result: {result}")
+            
+            # Small delay to prevent CPU spinning
+            time.sleep(0.1)
+            
+    except KeyboardInterrupt:
+        logging.info("Keyboard interrupt received")
+        logging.info("Stopping Meebo Robot")
+    except Exception as e:
+        logging.error(f"Error in main loop: {str(e)}")
+        raise
+    finally:
+        logging.info("Meebo Robot stopped successfully")
 
 if __name__ == "__main__":
     main()

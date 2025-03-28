@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List, Union, Callable, Iterator
 import time
 
 from src.config.settings import LLM_SERVER
+from src.tools.robot_tools import ROBOT_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class LLMClient:
         self.model = model or LLM_SERVER["model"]
         self.base_url = f"http://{self.host}:{self.port}/api"
         self.context = []  # For maintaining conversation context
+        self.tools = ROBOT_TOOLS  # Store available tools
         
         logger.info(f"LLM client initialized with model {self.model} at {self.host}:{self.port}")
         # Try to ping the Ollama server
@@ -71,12 +73,36 @@ class LLMClient:
         3. Respond to voice commands
         4. Provide status updates
         
-        IMPORTANT: Always use the available tools to perform actions. DO NOT just suggest what to do - 
-        call the appropriate tool function instead. For example, instead of saying "I should move forward", 
-        call the move_forward tool with an appropriate speed.
+        Available tools:
+        """
         
-        When thinking through your decision, briefly include your reasoning BEFORE calling any tools.
-        Your reasoning should be 1-2 short sentences, followed by the appropriate tool call.
+        # Add available tools to the prompt
+        for tool in self.tools:
+            if isinstance(tool, dict) and "function" in tool:
+                func = tool["function"]
+                system_prompt += f"\n{func['name']}: {func['description']}"
+                if "parameters" in func and "properties" in func["parameters"]:
+                    params = func["parameters"]["properties"]
+                    if params:
+                        system_prompt += "\nParameters:"
+                        for param_name, param_info in params.items():
+                            param_desc = param_info.get("description", "")
+                            param_type = param_info.get("type", "unknown")
+                            system_prompt += f"\n  - {param_name} ({param_type}): {param_desc}"
+        
+        system_prompt += """
+        
+        IMPORTANT: Your response should follow this format:
+        
+        ACTIONS:
+        tool_name(param1=value1, param2=value2)
+        tool_name2(param1=value1)
+        
+        THOUGHTS:
+        Your reasoning about the current situation and what actions to take...
+        
+        The ACTIONS section should list each tool call on a new line in the format:
+        tool_name(param1=value1, param2=value2)
         
         Always choose the most appropriate tool for the situation based on the sensor readings.
         """
@@ -161,14 +187,16 @@ class LLMClient:
             callback (Callable, optional): Function to call for each chunk of the response.
             
         Yields:
-            Dict: Response chunks from the LLM.
+            Dict: Response chunks from the LLM with thoughts and actions.
         """
         prompt = self._prepare_prompt(sensor_data, camera_data, custom_prompt)
-        prepared_tools = self._prepare_tools(tools)
+        prepared_tools = self._prepare_tools(tools or self.tools)  # Use instance tools if none provided
+        self.tools = prepared_tools  # Store the tools list for validation
         
         # Buffer for accumulating the complete response
         complete_response = ""
         response_count = 0
+        last_actions = []  # Track last parsed actions to detect changes
         
         try:
             # Prepare the request to Ollama
@@ -194,6 +222,7 @@ class LLMClient:
                 logger.debug(f"Using conversation context with {len(self.context)} tokens")
             if prepared_tools:
                 logger.debug(f"Using {len(prepared_tools)} tools")
+                logger.debug(f"Available tools: {[tool['function']['name'] for tool in prepared_tools]}")
             
             # Make the API call with streaming
             start_time = time.time()
@@ -220,37 +249,56 @@ class LLMClient:
                                 # Append to the complete response
                                 if "response" in chunk:
                                     complete_response += chunk["response"]
-                                    # Log the actual text response from the LLM for debugging
-                                    logger.debug(f"LLM chunk: {chunk.get('response', '')}")
                                 
-                                # Create a chunk result with the raw data
-                                chunk_result = {
-                                    "raw_chunk": chunk,
-                                    "complete": chunk.get("done", False),
-                                    "text": chunk.get("response", "")
-                                }
-                                
-                                # Log tool calls if present in the chunk
-                                if "tool_calls" in chunk:
-                                    logger.info(f"Streaming chunk contains {len(chunk['tool_calls'])} tool calls")
-                                    chunk_result["tool_calls"] = chunk["tool_calls"]
-                                
-                                # Call the callback if provided
-                                if callback:
-                                    callback(chunk_result)
-                                
-                                # Yield the chunk result
-                                yield chunk_result
-                                
-                                # If done, break the loop
-                                if chunk.get("done", False):
-                                    break
+                                # Try to parse the accumulated response
+                                try:
+                                    parsed_chunk = self._parse_llm_response(complete_response)
+                                    
+                                    # Check if actions have changed
+                                    if parsed_chunk["actions"] != last_actions:
+                                        last_actions = parsed_chunk["actions"]
+                                        # Log new actions
+                                        for action in parsed_chunk["actions"]:
+                                            logger.info(f"New action detected: {action['tool']} with params {action['params']}")
+                                    
+                                    # Create a chunk result
+                                    chunk_result = {
+                                        "thoughts": parsed_chunk["thoughts"],
+                                        "actions": parsed_chunk["actions"],
+                                        "complete": chunk.get("done", False)
+                                    }
+                                    
+                                    # Call the callback if provided
+                                    if callback:
+                                        callback(chunk_result)
+                                    
+                                    # Yield the chunk result
+                                    yield chunk_result
+                                    
+                                    # If done, break the loop
+                                    if chunk.get("done", False):
+                                        break
+                                except Exception as e:
+                                    # If we can't parse yet, just yield the raw text
+                                    chunk_result = {
+                                        "thoughts": complete_response,
+                                        "actions": [],
+                                        "complete": chunk.get("done", False)
+                                    }
+                                    if callback:
+                                        callback(chunk_result)
+                                    yield chunk_result
+                                    
                             except json.JSONDecodeError:
                                 logger.warning(f"Failed to parse JSON from streaming response: {line_str}")
                 else:
                     error_msg = f"Error from LLM API: {response.status_code}"
                     logger.error(error_msg)
-                    yield {"error": error_msg}
+                    yield {
+                        "thoughts": f"Error: {error_msg}",
+                        "actions": [],
+                        "complete": True
+                    }
                     
             end_time = time.time()
             elapsed_time = end_time - start_time
@@ -259,11 +307,19 @@ class LLMClient:
         except requests.exceptions.RequestException as e:
             error_msg = f"Request failed: {str(e)}"
             logger.error(error_msg)
-            yield {"error": error_msg}
+            yield {
+                "thoughts": f"Error: {error_msg}",
+                "actions": [],
+                "complete": True
+            }
         except Exception as e:
             error_msg = f"Error processing LLM response: {str(e)}"
             logger.error(error_msg)
-            yield {"error": error_msg}
+            yield {
+                "thoughts": f"Error: {error_msg}",
+                "actions": [],
+                "complete": True
+            }
         
     def process(self, 
                sensor_data: Optional[Dict[str, Any]] = None,
@@ -280,10 +336,11 @@ class LLMClient:
             tools (List[Dict], optional): List of tool definitions to provide to the LLM.
             
         Returns:
-            Dict: Response from the LLM with tool calls or text.
+            Dict: Response from the LLM with thoughts and actions.
         """
         prompt = self._prepare_prompt(sensor_data, camera_data, custom_prompt)
-        prepared_tools = self._prepare_tools(tools)
+        prepared_tools = self._prepare_tools(tools or self.tools)  # Use instance tools if none provided
+        self.tools = prepared_tools  # Store the tools list for validation
         
         try:
             # Prepare the request to Ollama
@@ -309,6 +366,7 @@ class LLMClient:
                 logger.debug(f"Using conversation context with {len(self.context)} tokens")
             if prepared_tools:
                 logger.debug(f"Using {len(prepared_tools)} tools")
+                logger.debug(f"Available tools: {[tool['function']['name'] for tool in prepared_tools]}")
             
             # Make the API call
             start_time = time.time()
@@ -331,56 +389,133 @@ class LLMClient:
                 logger.debug(f"Context tokens: {old_context_size} → {new_context_size}")
                 
                 if "response" in result:
-                    # Truncate response for logging if it's too long
-                    response_preview = result["response"][:200]
-                    if len(result["response"]) > 200:
-                        response_preview += "..."
-                    logger.debug(f"Response preview: {response_preview}")
+                    # Parse the response into our structured format
+                    parsed_response = self._parse_llm_response(result["response"])
                     
-                    # Log the full response at INFO level for monitoring
-                    logger.info(f"LLM full response: {result['response']}")
-                
-                # Check for tool calls in the response
-                if "tool_calls" in result:
-                    logger.info(f"LLM returned {len(result['tool_calls'])} tool calls")
+                    # Log the thoughts and actions
+                    logger.info(f"LLM thoughts: {parsed_response['thoughts']}")
+                    if parsed_response["actions"]:
+                        logger.info(f"LLM actions: {len(parsed_response['actions'])} actions")
+                        for action in parsed_response["actions"]:
+                            logger.info(f"Action: {action['tool']} with params {action['params']}")
+                    
+                    return parsed_response
+                else:
+                    logger.error("No response field in LLM result")
                     return {
-                        "tool_calls": result["tool_calls"],
-                        "raw_response": result.get("response", "")
+                        "thoughts": "Error: No response received from LLM",
+                        "actions": []
                     }
-                
-                # If no tool calls, just return the text response
-                return {
-                    "text": result.get("response", "").strip(),
-                    "raw_response": result.get("response", "")
-                }
             else:
                 logger.error(f"Error from LLM API: {response.status_code} - {response.text}")
-                return {"error": f"API Error: {response.status_code}"}
+                return {
+                    "thoughts": f"Error: API returned status code {response.status_code}",
+                    "actions": []
+                }
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed: {str(e)}")
-            return {"error": f"Request failed: {str(e)}"}
+            return {
+                "thoughts": f"Error: Request failed - {str(e)}",
+                "actions": []
+            }
         except Exception as e:
             logger.error(f"Error processing LLM response: {str(e)}")
-            return {"error": f"Processing error: {str(e)}"}
+            return {
+                "thoughts": f"Error: Processing error - {str(e)}",
+                "actions": []
+            }
     
     def _parse_llm_response(self, response_text: str) -> Dict[str, Any]:
         """
-        Parse the LLM response text.
+        Parse the LLM response text to extract actions and thoughts.
         
         Args:
             response_text (str): The raw text response from the LLM.
             
         Returns:
-            Dict: Basic parsed response.
+            Dict: Parsed response with thoughts and actions.
         """
-        # The LLM is now instructed to use tool calls directly, 
-        # so we don't need to parse JSON from the response anymore.
-        # Just return a simple dict with the text
-        return {
-            "text": response_text.strip(),
-            "raw_response": response_text
-        }
+        try:
+            # Split response into actions and thoughts sections
+            sections = response_text.split("THOUGHTS:", 1)
+            actions_text = sections[0].strip()
+            thoughts_text = sections[1].strip() if len(sections) > 1 else ""
+            
+            # Extract actions from the ACTIONS section
+            actions = []
+            if "ACTIONS:" in actions_text:
+                actions_text = actions_text.split("ACTIONS:", 1)[1].strip()
+                for line in actions_text.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Parse tool call in format: tool_name(param1=value1, param2=value2)
+                    if "(" in line and line.endswith(")"):
+                        tool_name = line[:line.find("(")].strip()
+                        params_str = line[line.find("(")+1:line.rfind(")")].strip()
+                        
+                        # Validate tool name against available tools
+                        if not self._is_valid_tool(tool_name):
+                            logger.warning(f"Invalid tool name detected: {tool_name}")
+                            continue
+                        
+                        # Parse parameters
+                        params = {}
+                        if params_str:
+                            for param in params_str.split(","):
+                                param = param.strip()
+                                if "=" in param:
+                                    key, value = param.split("=", 1)
+                                    # Try to convert value to appropriate type
+                                    try:
+                                        value = json.loads(value)
+                                    except json.JSONDecodeError:
+                                        # Keep as string if not valid JSON
+                                        pass
+                                    params[key.strip()] = value
+                        
+                        actions.append({
+                            "tool": tool_name,
+                            "params": params
+                        })
+            
+            return {
+                "thoughts": thoughts_text,
+                "actions": actions
+            }
+            
+        except Exception as e:
+            logger.error(f"Error parsing LLM response: {str(e)}")
+            return {
+                "thoughts": "Error: Failed to parse response",
+                "actions": []
+            }
+    
+    def _is_valid_tool(self, tool_name: str) -> bool:
+        """
+        Check if a tool name is valid by checking against available tools.
+        
+        Args:
+            tool_name (str): The name of the tool to validate.
+            
+        Returns:
+            bool: True if the tool is valid, False otherwise.
+        """
+        # Get the list of available tool names
+        available_tools = []
+        for tool in self._prepare_tools(self.tools):
+            if isinstance(tool, dict):
+                if "function" in tool:
+                    available_tools.append(tool["function"]["name"])
+                elif "name" in tool:
+                    available_tools.append(tool["name"])
+        
+        # Check if the tool name is in the list
+        is_valid = tool_name in available_tools
+        if not is_valid:
+            logger.warning(f"Tool '{tool_name}' not found in available tools: {available_tools}")
+        return is_valid
     
     def execute_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
         """
